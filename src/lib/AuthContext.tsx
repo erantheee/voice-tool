@@ -93,16 +93,22 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       provider.setCustomParameters({ prompt: 'select_account' });
       await signInWithPopup(auth, provider);
     } catch (error: any) {
-      console.error("Login error:", error);
-      if (error.code === 'auth/popup-blocked') {
+      console.error("Login error details:", error);
+      const errorCode = error.code;
+      const errorMessage = error.message;
+      
+      if (errorCode === 'auth/popup-blocked') {
         toast.error('登录窗口被浏览器拦截，请允许弹出窗口后重试。');
-      } else if (error.code === 'auth/cancelled-popup-request') {
-        // This often happens if the user clicks login twice or closes the popup quickly
+      } else if (errorCode === 'auth/cancelled-popup-request') {
         console.log('Popup request cancelled');
-      } else if (error.code === 'auth/popup-closed-by-user') {
+      } else if (errorCode === 'auth/popup-closed-by-user') {
         toast.info('登录窗口已关闭');
+      } else if (errorCode === 'auth/unauthorized-domain') {
+        toast.error('当前域名未在 Firebase 中授权。请尝试使用“访客模式”或联系开发者。');
+      } else if (errorCode === 'auth/operation-not-allowed') {
+        toast.error('Google 登录未在 Firebase 控制台中启用。');
       } else {
-        toast.error('登录失败: ' + (error.message || '未知错误'));
+        toast.error(`登录失败 (${errorCode}): ${errorMessage || '未知错误'}`);
       }
     } finally {
       setIsLoggingIn(false);

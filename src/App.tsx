@@ -159,6 +159,7 @@ export default function App() {
       };
 
       mediaRecorder.onstop = async () => {
+        const savingToast = toast.loading('正在保存并分析记录...');
         try {
           if (recognitionRef.current) {
             recognitionRef.current.stop();
@@ -201,10 +202,12 @@ export default function App() {
                 status: 'completed'
               }).catch(err => handleFirestoreError(err, OperationType.UPDATE, `records/${currentRecordIdRef.current}`));
             }
+            toast.dismiss(savingToast);
             toast.success('记录已完成并分析');
           }
         } catch (error) {
           console.error("Error in onstop:", error);
+          toast.dismiss(savingToast);
           toast.error('保存记录时出错');
         } finally {
           setIsRecording(false);
@@ -268,6 +271,8 @@ export default function App() {
         recognition.continuous = true;
         recognition.interimResults = true;
         recognition.lang = 'zh-CN';
+        // Optimize for speed
+        if ('maxAlternatives' in recognition) recognition.maxAlternatives = 1;
 
         recognition.onresult = (event: any) => {
           let interim = '';
@@ -451,17 +456,24 @@ export default function App() {
     }, 5000);
   };
 
-  if (loading) return (
-    <div className="h-screen w-full flex items-center justify-center bg-slate-50">
-      <div className="flex flex-col items-center gap-4">
-        <div className="w-12 h-12 border-4 border-brand-500 border-t-transparent rounded-full animate-spin" />
-        <p className="text-slate-500 font-medium">加载中...</p>
+  if (loading) {
+    console.log('Auth is loading...');
+    return (
+      <div className="h-screen w-full flex items-center justify-center bg-slate-50">
+        <div className="flex flex-col items-center gap-4">
+          <div className="w-12 h-12 border-4 border-brand-500 border-t-transparent rounded-full animate-spin" />
+          <p className="text-slate-500 font-medium">加载中...</p>
+        </div>
       </div>
-    </div>
-  );
+    );
+  }
 
-  if (!user) return (
-    <div className="h-screen w-full flex items-center justify-center bg-slate-50 p-6">
+  console.log('Auth state:', { hasUser: !!user, isGuest, userId: user?.uid });
+
+  if (!user) {
+    console.log('No user found, showing login screen');
+    return (
+      <div className="h-screen w-full flex items-center justify-center bg-slate-50 p-6">
       <motion.div 
         initial={{ opacity: 0, y: 20 }}
         animate={{ opacity: 1, y: 0 }}
@@ -493,6 +505,7 @@ export default function App() {
       </motion.div>
     </div>
   );
+  }
 
   return (
     <div className="h-screen w-full bg-slate-200 flex items-center justify-center p-4 overflow-hidden font-sans">
@@ -580,87 +593,107 @@ export default function App() {
 
             <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 flex-1 min-h-0 overflow-hidden">
               {/* Recording Controls */}
-              <div className="lg:col-span-1 space-y-4 overflow-y-auto pr-1">
-                <div className="mac-card p-6 flex flex-col items-center justify-center text-center space-y-4">
-                  <div className={cn(
-                    "w-24 h-24 rounded-full flex items-center justify-center transition-all duration-500 shadow-inner relative overflow-hidden",
-                    isRecording ? "bg-red-500 scale-110 shadow-red-200" : "bg-slate-100"
-                  )}>
+              <div className="lg:col-span-1 space-y-4 overflow-hidden no-scrollbar pr-1">
+                <div className="mac-card p-6 flex flex-col items-center justify-center text-center space-y-6">
+                  <div className="flex items-center gap-4">
+                    {/* Main Recording Button */}
+                    <button 
+                      onClick={() => isRecording ? stopRecording() : startRecording()}
+                      className={cn(
+                        "w-20 h-20 rounded-full flex items-center justify-center transition-all duration-500 shadow-lg relative overflow-hidden active:scale-95 group",
+                        isRecording ? "bg-red-500 shadow-red-200" : "bg-slate-900 shadow-slate-200"
+                      )}
+                    >
+                      {isRecording && !isPaused && (
+                        <motion.div 
+                          className="absolute inset-0 bg-red-400 opacity-30"
+                          animate={{ 
+                            scale: [1, 1.2, 1],
+                            opacity: [0.3, 0.1, 0.3]
+                          }}
+                          transition={{ duration: 2, repeat: Infinity }}
+                        />
+                      )}
+                      
+                      {/* Volume Ring */}
+                      {isRecording && !isPaused && (
+                        <motion.div 
+                          className="absolute inset-0 border-4 border-white/30 rounded-full"
+                          animate={{ 
+                            scale: 1 + (volume / 100),
+                            opacity: 0.1 + (volume / 200)
+                          }}
+                          transition={{ type: "spring", stiffness: 300, damping: 20 }}
+                        />
+                      )}
+
+                      {isRecording ? (
+                        <Square className="w-8 h-8 text-white relative z-10 fill-current" />
+                      ) : (
+                        <Mic className="w-8 h-8 text-white relative z-10" />
+                      )}
+                    </button>
+
+                    {/* Pause Button */}
                     {isRecording && (
-                      <motion.div 
-                        className="absolute inset-0 bg-red-400 opacity-30"
-                        animate={{ 
-                          scale: 1 + (volume / 100),
-                          opacity: 0.1 + (volume / 200)
-                        }}
-                        transition={{ type: "spring", stiffness: 300, damping: 20 }}
-                      />
-                    )}
-                    {isRecording ? (
-                      <Mic className="w-10 h-10 text-white relative z-10" />
-                    ) : (
-                      <MicOff className="w-10 h-10 text-slate-400 relative z-10" />
+                      <motion.button 
+                        initial={{ opacity: 0, x: -10 }}
+                        animate={{ opacity: 1, x: 0 }}
+                        onClick={() => isPaused ? resumeRecording() : pauseRecording()}
+                        className="w-10 h-10 rounded-full bg-white border border-slate-200 shadow-sm flex items-center justify-center hover:bg-slate-50 transition-all active:scale-90 group"
+                        title={isPaused ? "继续录音" : "暂停录音"}
+                      >
+                        {isPaused ? (
+                          <Play className="w-4 h-4 text-brand-500 fill-current" />
+                        ) : (
+                          <Pause className="w-4 h-4 text-slate-600 fill-current" />
+                        )}
+                      </motion.button>
                     )}
                   </div>
-                  
+
+                  {/* Mark Button */}
                   {isRecording && (
-                    <div className="flex gap-1 h-8 items-center justify-center w-full">
+                    <motion.button 
+                      initial={{ opacity: 0, y: 5 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      onClick={toggleMark}
+                      className={cn(
+                        "px-4 py-2 rounded-full text-xs font-bold transition-all flex items-center gap-2 shadow-sm border",
+                        isMarked 
+                          ? "bg-amber-50 text-amber-600 border-amber-200" 
+                          : "bg-white text-slate-500 border-slate-100 hover:bg-slate-50"
+                      )}
+                    >
+                      <Bookmark className={cn("w-3.5 h-3.5", isMarked && "fill-current")} />
+                      {isMarked ? '已标记重点' : '标记重点'}
+                    </motion.button>
+                  )}
+                  
+                  <div className="space-y-0.5">
+                    <h3 className="font-bold text-sm">
+                      {!isRecording ? '准备就绪' : (isPaused ? '已暂停' : '')}
+                    </h3>
+                    <p className="text-[10px] text-slate-500 leading-tight">
+                      {isRecording 
+                        ? (isPaused ? '点击播放图标继续' : '') 
+                        : '点击麦克风开始记录'}
+                    </p>
+                  </div>
+
+                  {isRecording && !isPaused && (
+                    <div className="flex gap-1 h-4 items-center justify-center w-full">
                       {[...Array(12)].map((_, i) => (
                         <motion.div
                           key={i}
-                          className="w-1 bg-red-500 rounded-full"
+                          className="w-0.5 bg-red-500 rounded-full"
                           animate={{ 
-                            height: Math.max(4, (volume * (0.5 + Math.random() * 0.5)) * (1 - Math.abs(i - 5.5) / 6))
+                            height: Math.max(3, (volume * (0.4 + Math.random() * 0.4)) * (1 - Math.abs(i - 5.5) / 6))
                           }}
                           transition={{ type: "spring", stiffness: 300, damping: 20 }}
                         />
                       ))}
                     </div>
-                  )}
-                  
-                  <div className="space-y-1">
-                    <h3 className="font-bold text-base">{isRecording ? '正在倾听...' : '准备就绪'}</h3>
-                    <p className="text-[11px] text-slate-500 leading-tight">
-                      {isRecording ? '系统正在实时转写并分析内容' : '点击下方按钮开始一段新的记录'}
-                    </p>
-                  </div>
-
-                  <div className="flex w-full gap-2">
-                    <button 
-                      onClick={() => isRecording ? stopRecording() : startRecording()}
-                      className={cn(
-                        "flex-1 py-3 rounded-lg font-bold text-sm transition-all flex items-center justify-center gap-2 shadow-sm",
-                        isRecording 
-                          ? "bg-white border border-slate-200 text-slate-900 hover:bg-slate-50" 
-                          : "bg-slate-900 text-white hover:bg-slate-800"
-                      )}
-                    >
-                      {isRecording ? <Square className="w-4 h-4 fill-current" /> : <Play className="w-4 h-4 fill-current" />}
-                      {isRecording ? '停止记录' : '开始记录'}
-                    </button>
-                    
-                    {isRecording && (
-                      <button 
-                        onClick={() => isPaused ? resumeRecording() : pauseRecording()}
-                        className="p-3 mac-card hover:bg-slate-50 transition-all flex items-center justify-center"
-                        title={isPaused ? "继续录音" : "暂停录音"}
-                      >
-                        {isPaused ? <Play className="w-4 h-4 text-brand-500" /> : <Pause className="w-4 h-4 text-slate-600" />}
-                      </button>
-                    )}
-                  </div>
-
-                  {isRecording && (
-                    <button 
-                      onClick={toggleMark}
-                      className={cn(
-                        "w-full py-3 rounded-xl text-sm font-medium transition-all flex items-center justify-center gap-2",
-                        isMarked ? "bg-amber-50 text-amber-600 border border-amber-100" : "bg-slate-50 text-slate-500 hover:bg-slate-100"
-                      )}
-                    >
-                      <Bookmark className={cn("w-4 h-4", isMarked && "fill-current")} />
-                      {isMarked ? '已标记为重点' : '标记为重点'}
-                    </button>
                   )}
                 </div>
               </div>
@@ -672,7 +705,7 @@ export default function App() {
                     <span className="text-xs font-bold text-slate-400 uppercase tracking-wider">实时转写内容</span>
                     <span className="text-[10px] text-slate-400">AI 正在实时处理...</span>
                   </div>
-                  <div className="flex-1 overflow-y-auto p-6 space-y-6">
+                  <div className="flex-1 overflow-y-auto no-scrollbar p-6 space-y-6">
                     {currentTranscript.length === 0 ? (
                       <div className="h-full flex flex-col items-center justify-center text-slate-300 space-y-4">
                         <History className="w-12 h-12 opacity-20" />
@@ -737,7 +770,7 @@ export default function App() {
               </div>
             </header>
 
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 overflow-y-auto pr-1">
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 overflow-y-auto no-scrollbar pr-1">
               {records.map(record => (
                 <motion.div 
                   key={record.id}
