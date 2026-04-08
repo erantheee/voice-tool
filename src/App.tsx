@@ -45,6 +45,7 @@ export default function App() {
   const [volume, setVolume] = useState(0);
   const transcriptRef = useRef<TranscriptItem[]>([]);
   const [isCollectingVoice, setIsCollectingVoice] = useState(false);
+  const [autoListeningEnabled, setAutoListeningEnabled] = useState(true);
 
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const recognitionRef = useRef<any>(null);
@@ -93,10 +94,10 @@ export default function App() {
 
   // Start auto listening after login
   useEffect(() => {
-    if (!user) return;
+    if (!user || !autoListeningEnabled) return;
     startAutoListening();
     return () => stopAutoListening();
-  }, [user]);
+  }, [user, autoListeningEnabled]);
 
   const startAutoListening = async () => {
     if (autoListeningRef.current) return;
@@ -885,6 +886,26 @@ export default function App() {
             </header>
 
             <div className="space-y-4">
+              <section className="mac-card p-5 space-y-3">
+                <h3 className="font-bold text-sm flex items-center gap-2">
+                  <Volume2 className="w-4 h-4 text-brand-500" />
+                  自动监听
+                </h3>
+                <p className="text-xs text-slate-500">开启后将自动检测人声并自动录音/静音暂停。</p>
+                <div className="flex items-center gap-3">
+                  <button
+                    onClick={() => setAutoListeningEnabled(v => !v)}
+                    className={cn(
+                      "mac-button-secondary py-1.5 text-xs",
+                      autoListeningEnabled && "text-brand-500 border-brand-200 bg-brand-50"
+                    )}
+                  >
+                    {autoListeningEnabled ? '已开启' : '已关闭'}
+                  </button>
+                  <span className="text-[10px] text-slate-400">关闭后仅手动录音</span>
+                </div>
+              </section>
+
               <section className="mac-card p-5 space-y-3">
                 <h3 className="font-bold text-sm flex items-center gap-2">
                   <User className="w-4 h-4 text-brand-500" />
