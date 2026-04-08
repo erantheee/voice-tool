@@ -1,13 +1,22 @@
+export interface FollowedPerson {
+  id: string;
+  name: string;
+  voiceFrequency?: number;
+  sampleCount: number;
+}
+
 export interface UserProfile {
   uid: string;
   email: string;
   displayName?: string;
   voiceSample?: string;
+  voiceFrequency?: number;
+  followedPersons?: FollowedPerson[];
   createdAt: string;
 }
 
 export interface TranscriptItem {
-  speaker: 'me' | 'other';
+  speaker: 'me' | 'other' | string; // string for followed person ID
   text: string;
   timestamp: number;
 }

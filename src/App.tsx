@@ -4,6 +4,7 @@ import {
   Mic, 
   MicOff, 
   History, 
+  Languages,
   Settings, 
   User, 
   LogOut, 
@@ -18,12 +19,13 @@ import {
   CheckCircle2,
   AlertCircle,
   Pause,
-  Trash2
+  Trash2,
+  Users
 } from 'lucide-react';
 import { useAuth } from './lib/AuthContext';
 import { db } from './lib/firebase';
 import { collection, query, where, orderBy, onSnapshot, addDoc, updateDoc, doc, deleteDoc } from 'firebase/firestore';
-import { AudioRecord, TranscriptItem, UserProfile } from './types';
+import { AudioRecord, TranscriptItem, UserProfile, FollowedPerson } from './types';
 import { analyzeAudioContent } from './services/geminiService';
 import { format } from 'date-fns';
 import { zhCN } from 'date-fns/locale';
@@ -32,7 +34,7 @@ import { toast } from 'sonner';
 import { handleFirestoreError, OperationType } from './lib/firestoreErrorHandler';
 
 export default function App() {
-  const { user, profile, loading, isGuest, login, loginAsGuest, logout } = useAuth();
+  const { user, profile, loading, isGuest, login, loginAsGuest, logout, updateProfile } = useAuth();
   const [isRecording, setIsRecording] = useState(false);
   const [isPaused, setIsPaused] = useState(false);
   const [isMarked, setIsMarked] = useState(false);
@@ -42,8 +44,12 @@ export default function App() {
   const [activeTab, setActiveTab] = useState<'home' | 'history' | 'settings'>('home');
   const [currentTranscript, setCurrentTranscript] = useState<TranscriptItem[]>([]);
   const [interimText, setInterimText] = useState('');
+  const [recognitionLang, setRecognitionLang] = useState('zh-CN');
   const [volume, setVolume] = useState(0);
+  const [isAddingPerson, setIsAddingPerson] = useState(false);
+  const [newPersonName, setNewPersonName] = useState('');
   const transcriptRef = useRef<TranscriptItem[]>([]);
+  const transcriptEndRef = useRef<HTMLDivElement>(null);
   const [isCollectingVoice, setIsCollectingVoice] = useState(false);
   
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
@@ -53,6 +59,14 @@ export default function App() {
   const animationFrameRef = useRef<number | null>(null);
   const currentRecordIdRef = useRef<string | null>(null);
   const intervalRef = useRef<NodeJS.Timeout | null>(null);
+  const audioChunksRef = useRef<Blob[]>([]);
+
+  // Auto-scroll transcript
+  useEffect(() => {
+    if (transcriptEndRef.current) {
+      transcriptEndRef.current.scrollIntoView({ behavior: 'smooth' });
+    }
+  }, [currentTranscript, interimText]);
 
   // Cleanup on unmount
   useEffect(() => {
@@ -146,9 +160,11 @@ export default function App() {
       const mediaRecorder = new MediaRecorder(stream, mimeType ? { mimeType } : {});
       console.log('MediaRecorder initialized with mimeType:', mediaRecorder.mimeType);
       mediaRecorderRef.current = mediaRecorder;
+      audioChunksRef.current = [];
 
       mediaRecorder.ondataavailable = (e) => {
         if (e.data.size > 0) {
+          audioChunksRef.current.push(e.data);
           console.log('Audio data available:', e.data.size);
         }
       };
@@ -178,12 +194,32 @@ export default function App() {
           analyserRef.current = null;
           setVolume(0);
 
+          const audioBlob = new Blob(audioChunksRef.current, { type: mediaRecorderRef.current?.mimeType || 'audio/webm' });
+          const reader = new FileReader();
+          
+          const getBase64 = (): Promise<string> => new Promise((resolve) => {
+            reader.onloadend = () => {
+              const base64String = (reader.result as string).split(',')[1];
+              resolve(base64String);
+            };
+            reader.readAsDataURL(audioBlob);
+          });
+
+          const audioBase64 = await getBase64();
+
           if (currentRecordIdRef.current) {
             if (isGuest) {
-              const analysis = await analyzeAudioContent(transcriptRef.current);
+              const result = await analyzeAudioContent(transcriptRef.current, audioBase64, audioBlob.type);
               const updatedRecords: AudioRecord[] = records.map(r => 
                 r.id === currentRecordIdRef.current 
-                  ? { ...r, ...analysis, status: 'completed' as const, endTime: new Date().toISOString() } 
+                  ? { 
+                      ...r, 
+                      summary: result.summary, 
+                      analysis: result.analysis, 
+                      transcript: result.refinedTranscript || r.transcript,
+                      status: 'completed' as const, 
+                      endTime: new Date().toISOString() 
+                    } 
                   : r
               );
               setRecords(updatedRecords);
@@ -195,10 +231,12 @@ export default function App() {
                 endTime: new Date().toISOString()
               }).catch(err => handleFirestoreError(err, OperationType.UPDATE, `records/${currentRecordIdRef.current}`));
               
-              // Trigger AI Analysis using the ref value
-              const analysis = await analyzeAudioContent(transcriptRef.current);
+              // Trigger AI Analysis and Transcript Refinement
+              const result = await analyzeAudioContent(transcriptRef.current, audioBase64, audioBlob.type);
               await updateDoc(recordDoc, {
-                ...analysis,
+                summary: result.summary,
+                analysis: result.analysis,
+                transcript: result.refinedTranscript || transcriptRef.current,
                 status: 'completed'
               }).catch(err => handleFirestoreError(err, OperationType.UPDATE, `records/${currentRecordIdRef.current}`));
             }
@@ -270,8 +308,10 @@ export default function App() {
         const recognition = new SpeechRecognition();
         recognition.continuous = true;
         recognition.interimResults = true;
-        recognition.lang = 'zh-CN';
-        // Optimize for speed
+        // Use user selected language for better accuracy
+        recognition.lang = recognitionLang;
+        
+        // Optimize for speed and accuracy
         if ('maxAlternatives' in recognition) recognition.maxAlternatives = 1;
 
         recognition.onresult = (event: any) => {
@@ -281,8 +321,50 @@ export default function App() {
               const text = event.results[i][0].transcript.trim();
               console.log('Final speech result:', text);
               if (text) {
+                // Speaker detection based on voice frequency
+                let speaker: 'me' | 'other' | string = 'me';
+                if (profile?.voiceFrequency && analyserRef.current) {
+                  const bufferLength = analyserRef.current.frequencyBinCount;
+                  const dataArray = new Uint8Array(bufferLength);
+                  analyserRef.current.getByteFrequencyData(dataArray);
+                  
+                  let sum = 0;
+                  let count = 0;
+                  for (let j = 0; j < bufferLength; j++) {
+                    if (dataArray[j] > 30) { // Threshold to ignore noise
+                      sum += j;
+                      count++;
+                    }
+                  }
+                  const currentFreqIndex = count > 0 ? sum / count : 0;
+                  
+                  // Simple heuristic: if current frequency index is significantly different from profile
+                  // we assume it's someone else.
+                  const diff = Math.abs(currentFreqIndex - profile.voiceFrequency);
+                  if (diff > 8) { 
+                    speaker = 'other';
+                    
+                    // Check followed persons
+                    if (profile.followedPersons && profile.followedPersons.length > 0) {
+                      let bestMatch = null;
+                      let minDiff = 8; // High confidence threshold
+                      
+                      for (const person of profile.followedPersons) {
+                        if (person.voiceFrequency) {
+                          const pDiff = Math.abs(currentFreqIndex - person.voiceFrequency);
+                          if (pDiff < minDiff) {
+                            minDiff = pDiff;
+                            bestMatch = person.id;
+                          }
+                        }
+                      }
+                      if (bestMatch) speaker = bestMatch;
+                    }
+                  }
+                }
+
                 const newPart: TranscriptItem = {
-                  speaker: 'me',
+                  speaker,
                   text: text,
                   timestamp: Date.now()
                 };
@@ -437,23 +519,128 @@ export default function App() {
     }
   };
 
-  const updateProfile = async (data: Partial<UserProfile>) => {
-    if (!user) return;
-    const userDoc = doc(db, 'users', user.uid);
+  const startVoiceCollection = async (personId?: string) => {
     try {
-      await updateDoc(userDoc, data);
-    } catch (error: any) {
-      handleFirestoreError(error, OperationType.UPDATE, `users/${user.uid}`);
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
+      const analyser = audioContext.createAnalyser();
+      const source = audioContext.createMediaStreamSource(stream);
+      source.connect(analyser);
+      analyser.fftSize = 2048;
+
+      setIsCollectingVoice(true);
+      const targetName = personId 
+        ? profile?.followedPersons?.find(p => p.id === personId)?.name 
+        : '您自己';
+      toast.info(`正在采集 ${targetName} 的声纹，请持续说话 5 秒钟...`);
+
+      const frequencies: number[] = [];
+      const bufferLength = analyser.frequencyBinCount;
+      const dataArray = new Uint8Array(bufferLength);
+
+      const collectionInterval = setInterval(() => {
+        analyser.getByteFrequencyData(dataArray);
+        let sum = 0;
+        let count = 0;
+        for (let i = 0; i < bufferLength; i++) {
+          if (dataArray[i] > 30) { // Only count significant frequencies
+            sum += i;
+            count++;
+          }
+        }
+        if (count > 0) {
+          frequencies.push(sum / count);
+        }
+      }, 100);
+
+      setTimeout(async () => {
+        clearInterval(collectionInterval);
+        setIsCollectingVoice(false);
+        
+        // Calculate average frequency index
+        if (frequencies.length > 0) {
+          const avgFreq = frequencies.reduce((a, b) => a + b, 0) / frequencies.length;
+          
+          if (personId) {
+            const updatedPersons = profile?.followedPersons?.map(p => 
+              p.id === personId ? { ...p, voiceFrequency: avgFreq, sampleCount: p.sampleCount + 1 } : p
+            );
+            await updateProfile({ followedPersons: updatedPersons });
+            toast.success(`${targetName} 的声纹采集成功！`);
+          } else {
+            await updateProfile({ voiceFrequency: avgFreq });
+            toast.success('您的声纹采集成功！系统已记住您的声音特征。');
+          }
+        } else {
+          toast.error('未能采集到有效声音，请重试。');
+        }
+
+        // Cleanup
+        stream.getTracks().forEach(track => track.stop());
+        audioContext.close();
+      }, 5000);
+
+    } catch (err) {
+      console.error('Voice collection failed:', err);
+      toast.error('无法开启麦克风进行采集');
+      setIsCollectingVoice(false);
     }
   };
 
-  const startVoiceCollection = () => {
-    setIsCollectingVoice(true);
-    toast.info('正在采集声纹，请随意说几句话...');
-    setTimeout(() => {
-      setIsCollectingVoice(false);
-      toast.success('声纹采集成功！系统已记住您的声音。');
-    }, 5000);
+  const addFollowedPerson = async () => {
+    if (!newPersonName.trim()) return;
+    if ((profile?.followedPersons?.length || 0) >= 4) {
+      toast.error('最多只能关注 4 个人');
+      return;
+    }
+
+    const newPerson: FollowedPerson = {
+      id: `person_${Date.now()}`,
+      name: newPersonName.trim(),
+      sampleCount: 0
+    };
+
+    const updatedPersons = [...(profile?.followedPersons || []), newPerson];
+    await updateProfile({ followedPersons: updatedPersons });
+    setNewPersonName('');
+    setIsAddingPerson(false);
+    toast.success('关注人已添加');
+  };
+
+  const removeFollowedPerson = async (id: string) => {
+    const updatedPersons = profile?.followedPersons?.filter(p => p.id !== id);
+    await updateProfile({ followedPersons: updatedPersons });
+    toast.success('关注人已移除');
+  };
+
+  const tagSpeakerInTranscript = async (recordId: string, itemIdx: number, speakerId: string) => {
+    // This is a simplified version of "learning" - we use the AI to refine the transcript 
+    // and potentially update the voice frequency if we had raw audio data.
+    // For now, we just update the speaker in the transcript.
+    
+    const record = records.find(r => r.id === recordId);
+    if (!record) return;
+
+    const newTranscript = [...record.transcript];
+    newTranscript[itemIdx] = { ...newTranscript[itemIdx], speaker: speakerId };
+
+    if (isGuest) {
+      const updatedRecords = records.map(r => r.id === recordId ? { ...r, transcript: newTranscript } : r);
+      setRecords(updatedRecords);
+      localStorage.setItem('guest_records', JSON.stringify(updatedRecords));
+    } else {
+      await updateDoc(doc(db, 'records', recordId), { transcript: newTranscript })
+        .catch(err => handleFirestoreError(err, OperationType.UPDATE, `records/${recordId}`));
+    }
+    
+    // If it's a followed person, we could also "learn" their frequency here if we had the raw data.
+    // As a prototype, we'll just show a success message.
+    toast.success('说话人标记已更新');
+    
+    // Update selectedRecord if it's the one being edited
+    if (selectedRecord?.id === recordId) {
+      setSelectedRecord({ ...selectedRecord, transcript: newTranscript });
+    }
   };
 
   if (loading) {
@@ -712,25 +899,32 @@ export default function App() {
                         <p className="text-sm">暂无内容，开始记录后将在此显示转写</p>
                       </div>
                     ) : (
-                      currentTranscript.map((item, idx) => (
-                        <motion.div 
-                          key={idx}
-                          initial={{ opacity: 0, x: -10 }}
-                          animate={{ opacity: 1, x: 0 }}
-                          className="space-y-1"
-                        >
-                          <div className="flex items-center gap-2">
-                            <span className={cn(
-                              "text-[10px] font-bold px-1.5 py-0.5 rounded uppercase",
-                              item.speaker === 'me' ? "bg-brand-100 text-brand-700" : "bg-slate-100 text-slate-600"
-                            )}>
-                              {item.speaker === 'me' ? '我' : '他人'}
-                            </span>
-                            <span className="text-[10px] text-slate-400">{format(item.timestamp, 'HH:mm:ss')}</span>
-                          </div>
-                          <p className="text-slate-700 leading-relaxed">{item.text}</p>
-                        </motion.div>
-                      ))
+                      currentTranscript.map((item, idx) => {
+                        const speakerName = item.speaker === 'me' 
+                          ? '我' 
+                          : (profile?.followedPersons?.find(p => p.id === item.speaker)?.name || '他人');
+                        
+                        return (
+                          <motion.div 
+                            key={idx}
+                            initial={{ opacity: 0, x: -10 }}
+                            animate={{ opacity: 1, x: 0 }}
+                            className="space-y-1"
+                          >
+                            <div className="flex items-center gap-2">
+                              <span className={cn(
+                                "text-[10px] font-bold px-1.5 py-0.5 rounded uppercase",
+                                item.speaker === 'me' ? "bg-brand-100 text-brand-700" : 
+                                (item.speaker === 'other' ? "bg-slate-100 text-slate-600" : "bg-amber-100 text-amber-700")
+                              )}>
+                                {speakerName}
+                              </span>
+                              <span className="text-[10px] text-slate-400">{format(item.timestamp, 'HH:mm:ss')}</span>
+                            </div>
+                            <p className="text-slate-700 leading-relaxed">{item.text}</p>
+                          </motion.div>
+                        );
+                      })
                     )}
                     {interimText && (
                       <motion.div 
@@ -746,6 +940,7 @@ export default function App() {
                         <p className="text-slate-500 italic leading-relaxed">{interimText}</p>
                       </motion.div>
                     )}
+                    <div ref={transcriptEndRef} />
                   </div>
                 </div>
               </div>
@@ -835,12 +1030,109 @@ export default function App() {
             <div className="space-y-4">
               <section className="mac-card p-5 space-y-3">
                 <h3 className="font-bold text-sm flex items-center gap-2">
+                  <Languages className="w-4 h-4 text-brand-500" />
+                  识别语言
+                </h3>
+                <p className="text-xs text-slate-500">选择最适合当前对话的语言，以提高转写准确度（支持口音识别）。</p>
+                <select 
+                  value={recognitionLang}
+                  onChange={(e) => setRecognitionLang(e.target.value)}
+                  className="mac-input w-full py-1.5 text-xs"
+                >
+                  <option value="zh-CN">普通话 (中国大陆)</option>
+                  <option value="en-US">英语 (美国)</option>
+                  <option value="zh-HK">粤语 (香港)</option>
+                  <option value="zh-TW">国语 (台湾)</option>
+                  <option value="en-GB">英语 (英国)</option>
+                </select>
+              </section>
+
+              <section className="mac-card p-5 space-y-4">
+                <div className="flex justify-between items-center">
+                  <h3 className="font-bold text-sm flex items-center gap-2">
+                    <Users className="w-4 h-4 text-brand-500" />
+                    关注人 (最多 4 人)
+                  </h3>
+                  {!isAddingPerson && (profile?.followedPersons?.length || 0) < 4 && (
+                    <button 
+                      onClick={() => setIsAddingPerson(true)}
+                      className="text-[10px] font-bold text-brand-600 hover:text-brand-700"
+                    >
+                      + 添加关注人
+                    </button>
+                  )}
+                </div>
+                
+                {isAddingPerson && (
+                  <div className="p-3 bg-slate-50 rounded-xl border border-slate-100 space-y-3">
+                    <input 
+                      type="text" 
+                      placeholder="姓名/称呼" 
+                      value={newPersonName}
+                      onChange={(e) => setNewPersonName(e.target.value)}
+                      className="mac-input w-full py-1.5 text-xs"
+                      autoFocus
+                    />
+                    <div className="flex gap-2">
+                      <button 
+                        onClick={addFollowedPerson}
+                        className="flex-1 py-1.5 bg-brand-500 text-white rounded-lg text-[10px] font-bold"
+                      >
+                        确认添加
+                      </button>
+                      <button 
+                        onClick={() => setIsAddingPerson(false)}
+                        className="flex-1 py-1.5 bg-white border border-slate-200 text-slate-500 rounded-lg text-[10px] font-bold"
+                      >
+                        取消
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                <div className="space-y-3">
+                  {profile?.followedPersons && profile.followedPersons.length > 0 ? (
+                    profile.followedPersons.map(person => (
+                      <div key={person.id} className="flex items-center justify-between p-3 bg-slate-50/50 rounded-xl border border-slate-100">
+                        <div>
+                          <p className="text-xs font-bold text-slate-700">{person.name}</p>
+                          <p className="text-[10px] text-slate-400">
+                            {person.voiceFrequency ? `已录入声纹 (${person.sampleCount} 个样本)` : '待录入声纹'}
+                          </p>
+                        </div>
+                        <div className="flex gap-2">
+                          <button 
+                            onClick={() => startVoiceCollection(person.id)}
+                            disabled={isCollectingVoice}
+                            className="p-1.5 text-brand-600 hover:bg-brand-50 rounded-lg transition-colors"
+                            title="录入声纹"
+                          >
+                            <Mic className="w-3.5 h-3.5" />
+                          </button>
+                          <button 
+                            onClick={() => removeFollowedPerson(person.id)}
+                            className="p-1.5 text-red-400 hover:bg-red-50 rounded-lg transition-colors"
+                            title="移除"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
+                      </div>
+                    ))
+                  ) : (
+                    <p className="text-[10px] text-slate-400 text-center py-2">暂无关注人，点击上方按钮添加</p>
+                  )}
+                </div>
+              </section>
+
+              <section className="mac-card p-5 space-y-3">
+                <h3 className="font-bold text-sm flex items-center gap-2">
                   <User className="w-4 h-4 text-brand-500" />
                   我的声纹
                 </h3>
                 <p className="text-xs text-slate-500">采集您的声音样本，以便系统能够准确区分“我”与“他人”。</p>
                 <button 
-                  onClick={startVoiceCollection}
+                  onClick={() => startVoiceCollection()}
                   disabled={isCollectingVoice}
                   className={cn(
                     "mac-button-secondary py-1.5 text-xs flex items-center gap-2",
@@ -969,20 +1261,56 @@ export default function App() {
                 <section className="space-y-4">
                   <h4 className="text-xs font-bold text-slate-400 uppercase tracking-widest">完整对话转写</h4>
                   <div className="space-y-6">
-                    {selectedRecord.transcript.map((item, idx) => (
-                      <div key={idx} className="space-y-1">
-                        <div className="flex items-center gap-2">
-                          <span className={cn(
-                            "text-[10px] font-bold px-1.5 py-0.5 rounded uppercase",
-                            item.speaker === 'me' ? "bg-brand-100 text-brand-700" : "bg-slate-100 text-slate-600"
-                          )}>
-                            {item.speaker === 'me' ? '我' : '他人'}
-                          </span>
-                          <span className="text-[10px] text-slate-400">{format(item.timestamp, 'HH:mm:ss')}</span>
+                    {selectedRecord.transcript.map((item, idx) => {
+                      const speakerName = item.speaker === 'me' 
+                        ? '我' 
+                        : (profile?.followedPersons?.find(p => p.id === item.speaker)?.name || '他人');
+                      
+                      return (
+                        <div key={idx} className="space-y-1 group/item">
+                          <div className="flex items-center justify-between">
+                            <div className="flex items-center gap-2">
+                              <span className={cn(
+                                "text-[10px] font-bold px-1.5 py-0.5 rounded uppercase",
+                                item.speaker === 'me' ? "bg-brand-100 text-brand-700" : 
+                                (item.speaker === 'other' ? "bg-slate-100 text-slate-600" : "bg-amber-100 text-amber-700")
+                              )}>
+                                {speakerName}
+                              </span>
+                              <span className="text-[10px] text-slate-400">{format(item.timestamp, 'HH:mm:ss')}</span>
+                            </div>
+                            
+                            {/* Manual Tagging in Playback */}
+                            <div className="opacity-0 group-hover/item:opacity-100 transition-opacity flex gap-1">
+                              <button 
+                                onClick={() => tagSpeakerInTranscript(selectedRecord.id, idx, 'me')}
+                                className="text-[9px] px-1.5 py-0.5 bg-brand-50 text-brand-600 rounded hover:bg-brand-100"
+                              >
+                                标记为我
+                              </button>
+                              {profile?.followedPersons?.map(person => (
+                                <button 
+                                  key={person.id}
+                                  onClick={() => tagSpeakerInTranscript(selectedRecord.id, idx, person.id)}
+                                  className="text-[9px] px-1.5 py-0.5 bg-amber-50 text-amber-600 rounded hover:bg-amber-100"
+                                >
+                                  标记为{person.name}
+                                </button>
+                              ))}
+                              {item.speaker !== 'other' && (
+                                <button 
+                                  onClick={() => tagSpeakerInTranscript(selectedRecord.id, idx, 'other')}
+                                  className="text-[9px] px-1.5 py-0.5 bg-slate-50 text-slate-600 rounded hover:bg-slate-100"
+                                >
+                                  标记为他人
+                                </button>
+                              )}
+                            </div>
+                          </div>
+                          <p className="text-slate-700 leading-relaxed">{item.text}</p>
                         </div>
-                        <p className="text-slate-700 leading-relaxed">{item.text}</p>
-                      </div>
-                    ))}
+                      );
+                    })}
                   </div>
                 </section>
               </div>
