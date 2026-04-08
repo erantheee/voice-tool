@@ -1,4 +1,4 @@
-name: Build Tauri App (Windows)
+name: Build & Release Tauri App (Windows)
 
 on:
   workflow_dispatch:
@@ -6,6 +6,12 @@ on:
     branches:
       - main
       - master
+      - recording
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
 
 jobs:
   build-windows:
@@ -32,3 +38,34 @@ jobs:
         with:
           name: voice-tool-windows
           path: src-tauri/target/release/bundle
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build-windows
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build Tauri app
+        run: npx tauri build
+
+      - name: Create GitHub Release
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: "${{ github.ref_name }}"
+          releaseDraft: false
+          prerelease: false
