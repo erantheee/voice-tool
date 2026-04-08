@@ -45,7 +45,7 @@ export default function App() {
   const [volume, setVolume] = useState(0);
   const transcriptRef = useRef<TranscriptItem[]>([]);
   const [isCollectingVoice, setIsCollectingVoice] = useState(false);
-  
+
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const recognitionRef = useRef<any>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
@@ -53,6 +53,16 @@ export default function App() {
   const animationFrameRef = useRef<number | null>(null);
   const currentRecordIdRef = useRef<string | null>(null);
   const intervalRef = useRef<NodeJS.Timeout | null>(null);
+
+  // Auto listen / auto pause controls
+  const autoListeningRef = useRef(false);
+  const autoStreamRef = useRef<MediaStream | null>(null);
+  const autoAudioContextRef = useRef<AudioContext | null>(null);
+  const autoAnalyserRef = useRef<AnalyserNode | null>(null);
+  const autoFrameRef = useRef<number | null>(null);
+  const lastVoiceTimeRef = useRef<number>(Date.now());
+  const VOICE_THRESHOLD = 12; // 0-255 average
+  const SILENCE_TIMEOUT_MS = 1500;
 
   // Cleanup on unmount
   useEffect(() => {
@@ -62,6 +72,8 @@ export default function App() {
         mediaRecorderRef.current.stop();
         mediaRecorderRef.current.stream.getTracks().forEach(track => track.stop());
       }
+      // stop auto listening resources
+      stopAutoListening();
       if (recognitionRef.current) {
         recognitionRef.current.stop();
       }
@@ -78,6 +90,79 @@ export default function App() {
       console.warn('getUserMedia not supported in this browser');
     }
   }, []);
+
+  // Start auto listening after login
+  useEffect(() => {
+    if (!user) return;
+    startAutoListening();
+    return () => stopAutoListening();
+  }, [user]);
+
+  const startAutoListening = async () => {
+    if (autoListeningRef.current) return;
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      autoStreamRef.current = stream;
+      const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
+      const analyser = audioContext.createAnalyser();
+      const source = audioContext.createMediaStreamSource(stream);
+      source.connect(analyser);
+      analyser.fftSize = 256;
+      autoAudioContextRef.current = audioContext;
+      autoAnalyserRef.current = analyser;
+      autoListeningRef.current = true;
+
+      const bufferLength = analyser.frequencyBinCount;
+      const dataArray = new Uint8Array(bufferLength);
+
+      const tick = () => {
+        if (!autoAnalyserRef.current) return;
+        autoAnalyserRef.current.getByteFrequencyData(dataArray);
+        let sum = 0;
+        for (let i = 0; i < bufferLength; i++) sum += dataArray[i];
+        const average = sum / bufferLength;
+
+        const now = Date.now();
+        if (average > VOICE_THRESHOLD) {
+          lastVoiceTimeRef.current = now;
+          if (!isRecording) {
+            startRecording(false);
+          } else if (mediaRecorderRef.current?.state === 'paused') {
+            resumeRecording();
+          }
+        } else {
+          if (isRecording && mediaRecorderRef.current?.state === 'recording') {
+            if (now - lastVoiceTimeRef.current > SILENCE_TIMEOUT_MS) {
+              pauseRecording();
+            }
+          }
+        }
+
+        autoFrameRef.current = requestAnimationFrame(tick);
+      };
+      tick();
+    } catch (e) {
+      console.error('Auto listening failed:', e);
+      toast.error('自动监听启动失败，无法获取麦克风权限');
+    }
+  };
+
+  const stopAutoListening = () => {
+    autoListeningRef.current = false;
+    if (autoFrameRef.current) {
+      cancelAnimationFrame(autoFrameRef.current);
+      autoFrameRef.current = null;
+    }
+    if (autoAudioContextRef.current) {
+      autoAudioContextRef.current.close();
+      autoAudioContextRef.current = null;
+    }
+    if (autoStreamRef.current) {
+      autoStreamRef.current.getTracks().forEach(t => t.stop());
+      autoStreamRef.current = null;
+    }
+    autoAnalyserRef.current = null;
+  };
 
   // Fetch records
   useEffect(() => {
