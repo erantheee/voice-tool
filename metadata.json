@@ -1,0 +1,5 @@
+{
+  "name": "声印",
+  "description": "智能音频生活记录工具，支持实时录音、AI 总结与说话人识别。",
+  "requestFramePermissions": ["microphone"]
+}

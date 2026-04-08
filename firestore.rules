@@ -1,0 +1,77 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // ===============================================================
+    // Assumed Data Model
+    // ===============================================================
+    //
+    // Collection: users
+    // Document ID: {userId}
+    // Fields:
+    //   - uid: string (required)
+    //   - email: string (required)
+    //   - displayName: string (optional)
+    //   - voiceSample: string (optional)
+    //   - createdAt: string (required)
+    //
+    // Collection: records
+    // Document ID: {recordId}
+    // Fields:
+    //   - id: string (required)
+    //   - userId: string (required)
+    //   - title: string (required)
+    //   - startTime: string (required)
+    //   - endTime: string (optional)
+    //   - duration: number (optional)
+    //   - transcript: list (required)
+    //   - summary: string (optional)
+    //   - analysis: string (optional)
+    //   - isHighPriority: bool (required)
+    //   - status: string (required)
+    //
+    // ===============================================================
+
+    // ===============================================================
+    // Helper Functions
+    // ===============================================================
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    function isDocOwner() {
+      return isAuthenticated() && request.auth.uid == resource.data.userId;
+    }
+
+    function isValidUser(data) {
+      return data.uid is string && 
+             data.email is string &&
+             data.createdAt is string;
+    }
+
+    function isValidRecord(data) {
+      return data.userId is string &&
+             data.title is string &&
+             data.startTime is string &&
+             data.transcript is list &&
+             data.isHighPriority is bool &&
+             data.status in ['recording', 'processing', 'completed'];
+    }
+
+    match /users/{userId} {
+      allow read: if isOwner(userId);
+      allow create: if isOwner(userId) && isValidUser(request.resource.data);
+      allow update: if isOwner(userId) && isValidUser(request.resource.data);
+    }
+
+    match /records/{recordId} {
+      allow read: if isAuthenticated() && resource.data.userId == request.auth.uid;
+      allow create: if isAuthenticated() && request.resource.data.userId == request.auth.uid && isValidRecord(request.resource.data);
+      allow update: if isAuthenticated() && resource.data.userId == request.auth.uid && isValidRecord(request.resource.data);
+      allow delete: if isAuthenticated() && resource.data.userId == request.auth.uid;
+    }
+  }
+}

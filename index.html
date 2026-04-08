@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <script>
+      // Prevent "Uncaught TypeError: Cannot set property fetch of #<Window> which has only a getter"
+      (function() {
+        const originalFetch = window.fetch;
+        try {
+          Object.defineProperty(window, 'fetch', {
+            configurable: true,
+            enumerable: true,
+            get: () => originalFetch,
+            set: (v) => {
+              console.warn('Attempted to overwrite window.fetch. Overwrite ignored to prevent crash.');
+            }
+          });
+        } catch (e) {
+          // If defineProperty fails, we can't do much, but at least we tried.
+        }
+      })();
+    </script>
+    <title>声印 - 智能音频生活记录</title>
+  </head>
+  <body>
+    <div id="root" style="display: flex; align-items: center; justify-content: center; height: 100vh; font-family: sans-serif; color: #64748b;">
+      正在启动应用，请稍候...
+    </div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
+

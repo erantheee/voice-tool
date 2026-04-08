@@ -1,0 +1,56 @@
+{
+  "entities": {
+    "User": {
+      "title": "User",
+      "description": "User profile and voice samples",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "email": { "type": "string" },
+        "displayName": { "type": "string" },
+        "voiceSample": { "type": "string", "description": "Base64 encoded voice sample for identification" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "email"]
+    },
+    "Record": {
+      "title": "Record",
+      "description": "Audio record and transcriptions",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "userId": { "type": "string" },
+        "title": { "type": "string" },
+        "startTime": { "type": "string", "format": "date-time" },
+        "endTime": { "type": "string", "format": "date-time" },
+        "duration": { "type": "number" },
+        "transcript": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "speaker": { "type": "string", "enum": ["me", "other"] },
+              "text": { "type": "string" },
+              "timestamp": { "type": "number" }
+            }
+          }
+        },
+        "summary": { "type": "string" },
+        "analysis": { "type": "string" },
+        "isHighPriority": { "type": "boolean" },
+        "status": { "type": "string", "enum": ["recording", "processing", "completed"] }
+      },
+      "required": ["userId", "startTime"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": "User",
+      "description": "User profiles"
+    },
+    "/records/{recordId}": {
+      "schema": "Record",
+      "description": "Audio records"
+    }
+  }
+}
